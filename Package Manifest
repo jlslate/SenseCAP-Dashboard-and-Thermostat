@@ -1,0 +1,31 @@
+{
+  "packageName": "SenseCAP Dashboard and Thermostat",
+  "author": "jlslate",
+  "version": "1.2.0",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2026-06-09",
+  "releaseNotes": "1.2.0 -- Thermostat page merged from standalone project. Unified tile colors (red/blue/slate/black). Away/home auto-control with setpoint limits. Idle display blanking. Bleed fixes. 1.0.0 -- Initial release. Multi-page sensor dashboard supporting motion, smoke, water, contact, lock, garage, light, thermostat, and mixed pages. 1x1 to 5x5 grids.",
+  "documentationLink": "https://github.com/jlslate/SenseCAP-Dashboard-and-Thermostat",
+  "communityLink": "",
+  "apps": [
+    {
+      "id": "sensecap-dashboard-and-thermostat-app",
+      "name": "SenseCAP Dashboard and Thermostat",
+      "namespace": "jlslate",
+      "location": "https://raw.githubusercontent.com/jlslate/SenseCAP-Dashboard-and-Thermostat/main/sensecap-dashboard-and-thermostat-app.groovy",
+      "required": true,
+      "version": "1.2.0",
+      "oauth": false
+    }
+  ],
+  "drivers": [
+    {
+      "id": "sensecap-dashboard-and-thermostat-driver",
+      "name": "SenseCAP Dashboard and Thermostat",
+      "namespace": "jlslate",
+      "location": "https://raw.githubusercontent.com/jlslate/SenseCAP-Dashboard-and-Thermostat/main/sensecap-dashboard-and-thermostat-driver.groovy",
+      "required": true,
+      "version": "1.2.0"
+    }
+  ]
+}
