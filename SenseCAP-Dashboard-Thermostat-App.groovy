@@ -4,7 +4,7 @@
  */
 
 /**
- * SenseCAP Dashboard and Thermostat App v1.0.0
+ * SenseCAP Dashboard and Thermostat App v1.3.0
  *
  * Hubitat app companion to SenseCAP Dashboard and Thermostat Driver.
  * Manages up to 6 display pages on the SenseCAP Indicator D1 via openHASP/MQTT.
@@ -26,7 +26,7 @@
  * - getPageOrder() for UI (all pages); activePageOrder() for driver operations
  *
  * Author: jlslate (slate)
- * Version: 1.2.0
+ * Version: 1.3.0
  */
 
 definition(
@@ -660,16 +660,7 @@ def pushSlotTypesAndLayouts() {
         int dispPage = dispIdx + 1
         if (pageType(srcPage) == "thermostat") {
             def dev = settings["page${srcPage}ThermostatDevice"]
-            if (dev) {
-                try {
-                    settings.indicatorDevice."setPage${dispPage}ThermostatDevice"(dev.id.toString())
-                    // Also set the driver preference so it can call device commands directly
-                    settings.indicatorDevice.updateSetting("thermostatPage${dispPage}", [value: dev, type: "capability.thermostat"])
-                    infoLog "[Dashboard] Registered thermostat device ${dev.displayName} for page ${dispPage}"
-                } catch (Exception e) {
-                    infoLog "[Dashboard] WARN -- thermostat registration failed: ${e.message}"
-                }
-            }
+            if (dev) infoLog "[Dashboard] Registered thermostat device ${dev.displayName} for page ${dispPage}"
         }
     }
 
@@ -811,21 +802,16 @@ private void handleThermostatTapInApp(String tapValue) {
         return
     }
 
-    BigDecimal hereHigh = getThermostatLimit(settings["page${srcPage}VarHereHigh"] ?: "")
-    BigDecimal hereLow  = getThermostatLimit(settings["page${srcPage}VarHereLow"]  ?: "")
-
     infoLog "[Dashboard] Thermostat tap page ${dispPage} slot ${slot}: mode=${mode} heat=${heat} cool=${cool} away=${away}"
+
+    // Use stored setpoints as the source of truth
+    BigDecimal storedHeat = (state["page${srcPage}StoredHeat"] != null ? state["page${srcPage}StoredHeat"] : heat) as BigDecimal
+    BigDecimal storedCool = (state["page${srcPage}StoredCool"] != null ? state["page${srcPage}StoredCool"] : cool) as BigDecimal
+
     switch (slot) {
         case 2:
-            if (mode == "heat") {
-                BigDecimal newSp = heat + 1
-                if (hereHigh != null) newSp = [newSp, hereHigh].min()
-                dev.setHeatingSetpoint(newSp)
-            } else if (mode == "cool") {
-                BigDecimal newSp = cool + 1
-                if (hereHigh != null) newSp = [newSp, hereHigh].min()
-                dev.setCoolingSetpoint(newSp)
-            }
+            storedHeat = storedHeat + 1
+            storedCool = storedCool + 1
             break
         case 3:
             List<String> cycle = ["cool", "off", "heat"]
@@ -835,21 +821,40 @@ private void handleThermostatTapInApp(String tapValue) {
             String next = cycle[(curIdx + 1) % cycle.size()]
             infoLog "[Dashboard] Mode: ${liveMode} -> ${next}"
             dev.setThermostatMode(next)
-            break
+            state.pendingThermostatSyncPage = dispPage
+            runIn(1, "runPendingThermostatSync")
+            return
         case 4:
-            if (mode == "heat") {
-                BigDecimal newSp = heat - 1
-                if (hereLow != null) newSp = [newSp, hereLow].max()
-                dev.setHeatingSetpoint(newSp)
-            } else if (mode == "cool") {
-                BigDecimal newSp = cool - 1
-                if (hereLow != null) newSp = [newSp, hereLow].max()
-                dev.setCoolingSetpoint(newSp)
-            }
+            storedHeat = storedHeat - 1
+            storedCool = storedCool - 1
             break
     }
+
+    // Store updated setpoints and push both to device
+    state["page${srcPage}StoredHeat"] = storedHeat
+    state["page${srcPage}StoredCool"] = storedCool
+    infoLog "[Dashboard] Setpoints updated: heat=${storedHeat} cool=${storedCool}"
+    dev.setHeatingSetpoint(storedHeat)
+    dev.setCoolingSetpoint(storedCool)
+
+    // Auto-set mode based on current temp vs new setpoints
+    def tSensor = settings["page${srcPage}ThermostatTempSensor"]
+    def tempVal = tSensor ? tSensor.currentValue("temperature") : dev.currentValue("temperature")
+    if (tempVal != null) {
+        BigDecimal currentTemp = tempVal as BigDecimal
+        String currentMode = dev.currentValue("thermostatMode") ?: "off"
+        String targetMode
+        if (currentTemp > storedCool)      targetMode = "cool"
+        else if (currentTemp < storedHeat) targetMode = "heat"
+        else                               targetMode = "off"
+        if (currentMode != targetMode) {
+            infoLog "[Dashboard] Auto mode: temp=${currentTemp} -> ${targetMode}"
+            dev.setThermostatMode(targetMode)
+        }
+    }
+
     state.pendingThermostatSyncPage = dispPage
-    runIn(3, "runPendingThermostatSync")
+    runIn(1, "runPendingThermostatSync")
 }
 
 def runPendingThermostatSync() {
@@ -898,8 +903,9 @@ private void syncThermostatDisplay(int dispPage, dev) {
         temp = (dev.currentValue("temperature") ?: "--").toString()
     }
 
-    String heat  = (dev.currentValue("heatingSetpoint") ?: "--").toString()
-    String cool  = (dev.currentValue("coolingSetpoint") ?: "--").toString()
+    // Use stored setpoints if available (app-managed), else fall back to device values
+    String heat  = (state["page${srcPage}StoredHeat"] ?: dev.currentValue("heatingSetpoint") ?: "--").toString()
+    String cool  = (state["page${srcPage}StoredCool"] ?: dev.currentValue("coolingSetpoint") ?: "--").toString()
     String mode  = (dev.currentValue("thermostatMode") ?: "off").toString()
     String opSt  = (dev.currentValue("thermostatOperatingState") ?: "idle").toString()
     boolean away = (location.mode == "Away")
@@ -951,7 +957,9 @@ private void runAutoControlForPage(int srcPage) {
             return
         }
 
-        // Push away setpoints
+        // Store and push away setpoints
+        state["page${srcPage}StoredHeat"] = awayLow
+        state["page${srcPage}StoredCool"] = awayHigh
         BigDecimal curHeat = dev.currentValue("heatingSetpoint") as BigDecimal
         BigDecimal curCool = dev.currentValue("coolingSetpoint") as BigDecimal
         if (curHeat != awayLow)  { infoLog "[Dashboard] Away: setting heat setpoint ${curHeat} -> ${awayLow}";  dev.setHeatingSetpoint(awayLow) }
@@ -983,8 +991,13 @@ private void runAutoControlForPage(int srcPage) {
         BigDecimal curHeat = dev.currentValue("heatingSetpoint") as BigDecimal
         BigDecimal curCool = dev.currentValue("coolingSetpoint") as BigDecimal
         infoLog "[Dashboard] Auto-control Home p${srcPage}: low=${hereLow} high=${hereHigh} curHeat=${curHeat} curCool=${curCool}"
-        if (curHeat != hereLow)  { infoLog "[Dashboard] Home: heat ${curHeat} -> ${hereLow}";  dev.setHeatingSetpoint(hereLow) }
-        if (curCool != hereHigh) { infoLog "[Dashboard] Home: cool ${curCool} -> ${hereHigh}"; dev.setCoolingSetpoint(hereHigh) }
+        // Store and push home setpoints
+        state["page${srcPage}StoredHeat"] = hereLow
+        state["page${srcPage}StoredCool"] = hereHigh
+        infoLog "[Dashboard] Home: setting heat setpoint -> ${hereLow}"
+        dev.setHeatingSetpoint(hereLow)
+        infoLog "[Dashboard] Home: setting cool setpoint -> ${hereHigh}"
+        dev.setCoolingSetpoint(hereHigh)
     }
 }
 
