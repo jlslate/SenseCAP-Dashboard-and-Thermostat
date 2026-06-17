@@ -4,7 +4,7 @@
  */
 
 /**
- * SenseCAP Dashboard and Thermostat App v1.3.0
+ * SenseCAP Dashboard and Thermostat App v1.3.1
  *
  * Hubitat app companion to SenseCAP Dashboard and Thermostat Driver.
  * Manages up to 6 display pages on the SenseCAP Indicator D1 via openHASP/MQTT.
@@ -25,8 +25,14 @@
  * - On save/reboot: rebootDisplay sent if MQTT connected, LWT triggers re-push
  * - getPageOrder() for UI (all pages); activePageOrder() for driver operations
  *
+ * Changelog:
+ * v1.3.1 -- Fix: Home auto-control now reads current temp and sets thermostat
+ *           mode (heat/cool/off) to keep temp within home setpoints, matching
+ *           the Away path behaviour. Also calls runAutoControlAllPages from
+ *           thermostatPeriodicSync so drift is caught between mode changes.
+ *
  * Author: jlslate (slate)
- * Version: 1.3.0
+ * Version: 1.3.1
  */
 
 definition(
@@ -867,8 +873,6 @@ def runPendingThermostatSync() {
     if (dev) syncThermostatDisplay(dispPage, dev)
 }
 
-
-
 def thermostatHandler(evt) {
     debugLog "[Dashboard] thermostatHandler: ${evt.device.displayName} ${evt.name}=${evt.value}"
     if (state.appPushInProgress) return
@@ -880,6 +884,9 @@ def thermostatHandler(evt) {
         def dev = settings["page${srcPage}ThermostatDevice"]
         if (!dev || dev.id.toString() != deviceId) return
         syncThermostatDisplay(dispPage, dev)
+        // Also re-evaluate auto-control on every temperature event so drift
+        // across a setpoint boundary is caught immediately
+        if (evt.name == "temperature") runAutoControlForPage(srcPage)
     }
 }
 
@@ -926,7 +933,12 @@ def thermostatPeriodicSync() {
         int dispPage = dispIdx + 1
         if (pageType(srcPage) != "thermostat") return
         def dev = settings["page${srcPage}ThermostatDevice"]
-        if (dev) syncThermostatDisplay(dispPage, dev)
+        if (dev) {
+            syncThermostatDisplay(dispPage, dev)
+            // Re-evaluate auto-control every minute so drift is caught even
+            // when no temperature events arrive (e.g. slow-polling devices)
+            runAutoControlForPage(srcPage)
+        }
     }
 }
 
@@ -981,23 +993,39 @@ private void runAutoControlForPage(int srcPage) {
             dev.setThermostatMode(targetMode)
         }
     } else {
-        // Home -- push home setpoints
+        // ── Home path ─────────────────────────────────────────────────────────
+        // FIX v1.3.1: read current temp and set mode to keep within home limits,
+        // matching the behaviour of the Away path. Previously only setpoints were
+        // pushed and mode was never updated, causing temp to drift outside the band.
         BigDecimal hereHigh = getThermostatLimit(settings["page${srcPage}VarHereHigh"])
         BigDecimal hereLow  = getThermostatLimit(settings["page${srcPage}VarHereLow"])
         if (hereHigh == null || hereLow == null) {
             infoLog "[Dashboard] Auto-control p${srcPage}: home limits not set"
             return
         }
+
         BigDecimal curHeat = dev.currentValue("heatingSetpoint") as BigDecimal
         BigDecimal curCool = dev.currentValue("coolingSetpoint") as BigDecimal
-        infoLog "[Dashboard] Auto-control Home p${srcPage}: low=${hereLow} high=${hereHigh} curHeat=${curHeat} curCool=${curCool}"
-        // Store and push home setpoints
+        if (curHeat != hereLow)  { infoLog "[Dashboard] Home: setting heat setpoint ${curHeat} -> ${hereLow}";  dev.setHeatingSetpoint(hereLow) }
+        if (curCool != hereHigh) { infoLog "[Dashboard] Home: setting cool setpoint ${curCool} -> ${hereHigh}"; dev.setCoolingSetpoint(hereHigh) }
         state["page${srcPage}StoredHeat"] = hereLow
         state["page${srcPage}StoredCool"] = hereHigh
-        infoLog "[Dashboard] Home: setting heat setpoint -> ${hereLow}"
-        dev.setHeatingSetpoint(hereLow)
-        infoLog "[Dashboard] Home: setting cool setpoint -> ${hereHigh}"
-        dev.setCoolingSetpoint(hereHigh)
+
+        def tSensor = settings["page${srcPage}ThermostatTempSensor"]
+        def tempVal = tSensor ? tSensor.currentValue("temperature") : dev.currentValue("temperature")
+        if (tempVal == null) { infoLog "[Dashboard] Auto-control p${srcPage}: no temperature"; return }
+        BigDecimal temp = tempVal as BigDecimal
+
+        String curMode = dev.currentValue("thermostatMode") ?: "off"
+        String targetMode
+        if (temp > hereHigh)     { targetMode = "cool"; infoLog "[Dashboard] Home: ${temp} > ${hereHigh} -- cooling" }
+        else if (temp < hereLow) { targetMode = "heat"; infoLog "[Dashboard] Home: ${temp} < ${hereLow} -- heating" }
+        else                     { targetMode = "off";  infoLog "[Dashboard] Home: ${temp} within [${hereLow}-${hereHigh}] -- off" }
+
+        if (curMode != targetMode) {
+            infoLog "[Dashboard] Auto-control p${srcPage}: ${curMode} -> ${targetMode}"
+            dev.setThermostatMode(targetMode)
+        }
     }
 }
 
