@@ -1533,7 +1533,7 @@ private void publishColor(int page, int idx, String color) {
     String node     = settings.haspNode ?: "plate"
     String contrast = contrastColor(color)
     // Single JSONL updates bg_color and text_color atomically -- no render between them
-    String jsonl = '{"page":' + page + ',"id":' + bgId(idx) + ',"bg_color":"' + color + '","text_color":"' + contrast + '"}' 
+        String jsonl = '{"page":' + page + ',"id":' + bgId(idx) + ',"bg_color":"' + color + '","text_color":"' + contrast + '","value_color":"' + contrast + '"}' 
     safePub("hasp/" + node + "/command/jsonl", jsonl)
 }
 
