@@ -4,13 +4,13 @@
  */
 
 /**
- * SenseCAP Dashboard and Thermostat Driver v1.4.0
+ * SenseCAP Dashboard and Thermostat Driver v1.5.0
  *
  * Hubitat driver for the SenseCAP Indicator D1 (480x480) running openHASP firmware.
  * Communicates via MQTT. Up to 6 pages, each independently configurable.
  *
  * Key features:
- * - Up to 6 pages: smoke / motion / water / contact / lock / garage / light / thermostat / mixed / alarm
+ * - Up to 6 pages: smoke / motion / water / contact / lock / garage / light / thermostat / mixed
  * - Grid auto-sized 1x1 to 5x5 based on device count (1, 4, 9, 16, 25 slots)
  * - Tile rearrangement via slot position numbers in app
  * - Page display order adjustable in app
@@ -22,16 +22,9 @@
  * - Backlight management: idle timeout, motion-triggered on/off, touch timeout
  * - safePub() wraps all MQTT publishes -- auto-reconnects on drop
  * - Thermostat tap IPC via device event (no hub variable required)
- * - Alarm clock page: live time/date, configurable buzzer alarm, set on-display
- *
- * Changelog:
- * v1.4.0 -- Add alarm clock page type. Shows current time and date. On-display
- *           buttons adjust alarm time (hour +/-, minute +5/-5, AM/PM). Tap the
- *           alarm row to enable/disable. Buzzer fires at the set time. Tap the
- *           alarm row again to dismiss a firing alarm.
  *
  * Author: jlslate
- * Version: 1.4.0
+ * Version: 1.5.0
  */
 
 import groovy.transform.Field
@@ -92,7 +85,6 @@ metadata {
 
         // Thermostat commands (one set per page -- app calls these directly)
         (1..6).each { pg ->
-            command "pushThermostatPage",         [[name:"page", type:"NUMBER"], [name:"data", type:"JSON_OBJECT"]]
             command "updateThermostatDisplay",    [[name:"page", type:"NUMBER"], [name:"data", type:"JSON_OBJECT"]]
         }
         attribute "thermostatTapped", "string"
@@ -119,7 +111,9 @@ metadata {
 
         input name: "colorActive",        type: "enum", title: "<b>Active color</b>",     options: activeColorOptions(), defaultValue: "#FF0000", required: true
         input name: "colorInactive",      type: "enum", title: "Inactive -- Motion",       options: colorOptions(),       defaultValue: "#008000", required: true
-        input name: "colorContactInactive",type:"enum", title: "Inactive -- Contact",      options: colorOptions(),       defaultValue: "#00FFFF", required: true
+        input name: "colorDoorInactive",    type: "enum", title: "Inactive -- Door",         options: colorOptions(),       defaultValue: "#00FFFF", required: true
+        input name: "colorWindowInactive",  type: "enum", title: "Inactive -- Window",       options: colorOptions(),       defaultValue: "#00FFFF", required: true
+        input name: "colorContactInactive", type: "enum", title: "Inactive -- Contact",      options: colorOptions(),       defaultValue: "#00FFFF", required: true
         input name: "colorWaterInactive", type: "enum", title: "Inactive -- Water",        options: colorOptions(),       defaultValue: "#0000FF", required: true
         input name: "colorSmokeInactive", type: "enum", title: "Inactive -- Smoke",        options: colorOptions(),       defaultValue: "#808080", required: true
         input name: "colorLightInactive", type: "enum", title: "Inactive -- Light off",    options: colorOptions(),       defaultValue: "#808080", required: true
@@ -198,7 +192,6 @@ def initialize() {
     }
     unschedule("sendHeartbeat")
     runEvery1Minute("sendHeartbeat")
-    unschedule("clockTick")
     scheduleIdleTimeout()
 }
 
@@ -243,17 +236,20 @@ private void applyGridLayout(int page, String g) {
     state["page${page}MaxSlots"] = maxSlotsForGrid(g)
     sendEvent(name: "page${page}GridLayout", value: g)
     infoLog "[Dashboard] Page ${page} grid -> ${g}"
-    (1..25).each { s -> state.remove("p${page}label${s}") }
+    (1..30).each { s -> state.remove("p${page}label${s}") }
 }
 
 private int maxSlotsForGrid(String g) {
     switch (g) {
         case "thermostat": return 4
-        case "alarm":      return 0   // no sensor slots; clock manages its own objects
         case "1x1": return 1
         case "3x3": return 9
         case "4x4": return 16
         case "5x5": return 25
+        case "6x5": return 30
+        case "3x2": return 6
+        case "4x3": return 12
+        case "5x4": return 20
         default:    return 4   // 2x2
     }
 }
@@ -268,20 +264,6 @@ private int maxSensors(int page) {
     return maxSlotsForGrid(activeGrid(page))
 }
 
-// Returns the text_font integer the layout uses for btn tiles on a given grid.
-// All icon overlays and light tile rebuilds must use the same value.
-private int tileFontFor(String grid) {
-    switch (grid) {
-        case "thermostat": return 24
-        case "alarm":      return 32
-        case "1x1": return 32
-        case "2x2": return 40
-        case "3x3": return 32
-        case "4x4": return 16
-        case "5x5": return 12
-        default:    return 16
-    }
-}
 
 // Icon font size for the value_str overlay on each grid size
 private int iconFontFor(String grid) {
@@ -290,26 +272,34 @@ private int iconFontFor(String grid) {
         case "2x2": return 40
         case "3x3": return 32
         case "4x4": return 24
-        case "5x5": return 24
+        case "5x5": return 16
+        case "6x5": return 16
+        case "3x2": return 32
+        case "4x3": return 24
+        case "5x4": return 16
         default:    return 32
     }
 }
 
-// Icon in value_str, centered horizontally, near top of tile.
-// Offset from object center: negative = up.
+// Icon in value_str, upper-left of tile.
+// Offsets are from object center: negative x = left, negative y = up.
 private int[] iconOffsetsFor(String grid) {
-    int tileH, iconFont
+    int tileW, tileH, iconFont
     switch (grid) {
-        case "1x1": tileH=476; iconFont=48; break
-        case "2x2": tileH=236; iconFont=40; break
-        case "3x3": tileH=157; iconFont=32; break
-        case "4x4": tileH=117; iconFont=24; break
-        case "5x5": tileH= 94; iconFont=24; break
-        default:    tileH=157; iconFont=32
+        case "1x1": tileW=476; tileH=476; iconFont=48; break
+        case "2x2": tileW=234; tileH=236; iconFont=40; break
+        case "3x3": tileW=154; tileH=157; iconFont=32; break
+        case "4x4": tileW=117; tileH=117; iconFont=24; break
+        case "5x5": tileW= 94; tileH= 94; iconFont=16; break
+        case "6x5": tileW= 77; tileH= 94; iconFont=16; break
+        case "3x2": tileW=157; tileH=237; iconFont=32; break
+        case "4x3": tileW=117; tileH=157; iconFont=24; break
+        case "5x4": tileW= 93; tileH=117; iconFont=16; break
+        default:    tileW=154; tileH=157; iconFont=32
     }
-    int ofsX = 0
-    int iconCenterY = (int)(tileH * 0.16)
-    int ofsY = iconCenterY - (int)(tileH / 2)
+    int pad = 6
+    int ofsX = (pad + (int)(iconFont / 2)) - (int)(tileW / 2)
+    int ofsY = (pad + (int)(iconFont / 2)) - (int)(tileH / 2)
     return [ofsX, ofsY] as int[]
 }
 
@@ -317,23 +307,33 @@ private int[] iconOffsetsFor(String grid) {
 private int labelFontFor(String grid) {
     switch (grid) {
         case "1x1": return 28
-        case "2x2": return 22
-        case "3x3": return 18
-        case "4x4": return 16
-        case "5x5": return 14
+        case "2x2": return 28
+        case "3x3": return 24
+        case "4x4": return 20
+        case "5x5": return 12
+        case "6x5": return 12
+        case "3x2": return 24
+        case "4x3": return 20
+        case "5x4": return 14
         default:    return 16
     }
 }
 
-// pad_top reserves space for the icon and pushes centered label into the lower portion of the tile
+private int labelFontFor(String grid, String label) { return labelFontFor(grid) }
+
+// pad_top pushes the label toward the bottom of the tile
 private int labelPadTopFor(String grid) {
     switch (grid) {
-        case "1x1": return 280
-        case "2x2": return 106
-        case "3x3": return  70
-        case "4x4": return  52
-        case "5x5": return  42
-        default:    return  70
+        case "1x1": return 380
+        case "2x2": return 160
+        case "3x3": return 105
+        case "4x4": return  78
+        case "5x5": return  60
+        case "6x5": return  58
+        case "3x2": return 180
+        case "4x3": return 105
+        case "5x4": return  85
+        default:    return 105
     }
 }
 
@@ -420,8 +420,6 @@ def sendHeartbeat() {
     }
     // NOTE: Do NOT send statusupdate here -- it resets the display's idle timer,
     // preventing the backlight from ever blanking. MQTT keepalive handles connection health.
-    // Update alarm clock pages while we're here -- piggybacking on the working scheduler.
-    clockTick()
 }
 
 // ── MQTT parse ─────────────────────────────────────────────────────────────────
@@ -529,13 +527,7 @@ private void handleButtonTap(String topic, String payload) {
     if (!matcher) return
     int page  = matcher[0][1] as int
     int btnId = matcher[0][2] as int
-    if (btnId < 1 || btnId > 25) return
-
-    // Alarm pages handle their own tap routing before slot type checks
-    if (activeGrid(page) == "alarm") {
-        handleAlarmTap(page, btnId)
-        return
-    }
+    if (btnId < 1 || btnId > 30) return
 
     int slot = btnId
     String sType = state[typeKey(page, slot)] ?: "none"
@@ -560,7 +552,6 @@ private void handleButtonTap(String topic, String payload) {
 def updateThermostatDisplay(page, data) {
     int pg = page as int
     if (!data) return
-    if (activeGrid(pg) == "alarm") return   // page was reconfigured; don't overwrite alarm objects
     String node    = settings.haspNode ?: "plate"
 
     String temp    = data.temp          ?: "--"
@@ -641,223 +632,6 @@ private String thermostatColorForState(String opState, String mode) {
     return "#708090"   // slate -- off or idle
 }
 
-// ── Alarm Clock ────────────────────────────────────────────────────────────────
-
-// Layout: 9 openHASP objects on a 480x480 canvas.
-//   id=1  Current time (large label, top)
-//   id=2  Current date (smaller label)
-//   id=3  Alarm enable/disable button (full-width, tappable)
-//   id=4  Hour minus button
-//   id=5  Alarm time display (label)
-//   id=6  Hour plus button
-//   id=7  Minute minus button (-5 min)
-//   id=8  AM/PM toggle button
-//   id=9  Minute plus button (+5 min)
-
-private List<String> layoutAlarmClock(int page) {
-    List<String> out = []
-    // Current time -- btn with click:false so command/p{n}b{id} updates apply
-    out << """{"page":${page},"id":1,"obj":"btn","x":2,"y":8,"w":476,"h":170,"bg_color":"#000000","bg_opa":0,"border_width":0,"text":"--:-- --","text_font":48,"text_color":"#FFFFFF","align":"center","toggle":false,"click":false}"""
-    // Current date
-    out << """{"page":${page},"id":2,"obj":"btn","x":2,"y":182,"w":476,"h":44,"bg_color":"#000000","bg_opa":0,"border_width":0,"text":"---","text_font":20,"text_color":"#AAAAAA","align":"center","toggle":false,"click":false}"""
-    // Alarm enable/disable row (full width, tappable)
-    out << """{"page":${page},"id":3,"obj":"btn","x":2,"y":230,"w":476,"h":56,"bg_color":"#2A2A2A","border_width":1,"border_color":"#505050","radius":6,"text":"Alarm: OFF","text_font":22,"text_color":"#888888","align":"center","toggle":false,"click":true}"""
-    // Hour minus
-    out << """{"page":${page},"id":4,"obj":"btn","x":2,"y":292,"w":110,"h":92,"bg_color":"#1A3A5C","border_width":2,"border_color":"#2A5A8C","radius":8,"text":"\\uE374","text_font":32,"text_color":"#FFFFFF","align":"center","toggle":false,"click":true}"""
-    // Alarm time display -- btn with click:false so command/p{n}b{id} updates apply
-    out << """{"page":${page},"id":5,"obj":"btn","x":115,"y":292,"w":250,"h":92,"bg_color":"#000000","bg_opa":0,"border_width":0,"text":"7:00 AM","text_font":36,"text_color":"#FFFFFF","align":"center","toggle":false,"click":false}"""
-    // Hour plus
-    out << """{"page":${page},"id":6,"obj":"btn","x":368,"y":292,"w":110,"h":92,"bg_color":"#1A3A5C","border_width":2,"border_color":"#2A5A8C","radius":8,"text":"\\uE415","text_font":32,"text_color":"#FFFFFF","align":"center","toggle":false,"click":true}"""
-    // Minute minus
-    out << """{"page":${page},"id":7,"obj":"btn","x":2,"y":388,"w":110,"h":90,"bg_color":"#1A3A5C","border_width":2,"border_color":"#2A5A8C","radius":8,"text":"\\uE374","text_font":32,"text_color":"#FFFFFF","align":"center","toggle":false,"click":true}"""
-    // AM/PM toggle
-    out << """{"page":${page},"id":8,"obj":"btn","x":115,"y":388,"w":250,"h":90,"bg_color":"#1A3A5C","border_width":2,"border_color":"#2A5A8C","radius":8,"text":"AM","text_font":28,"text_color":"#FFFFFF","align":"center","toggle":false,"click":true}"""
-    // Minute plus
-    out << """{"page":${page},"id":9,"obj":"btn","x":368,"y":388,"w":110,"h":90,"bg_color":"#1A3A5C","border_width":2,"border_color":"#2A5A8C","radius":8,"text":"\\uE415","text_font":32,"text_color":"#FFFFFF","align":"center","toggle":false,"click":true}"""
-    return out
-}
-
-// Push initial content to the alarm clock page after the layout objects exist.
-private void pushAlarmClockContent(int page) {
-    if (state["p${page}alarmHour"] == null)    state["p${page}alarmHour"]    = 7
-    if (state["p${page}alarmMinute"] == null)  state["p${page}alarmMinute"]  = 0
-    if (state["p${page}alarmEnabled"] == null) state["p${page}alarmEnabled"] = false
-    if (state["p${page}alarmFiring"] == null)  state["p${page}alarmFiring"]  = false
-    updateClockDisplay(page)
-    pauseExecution(50)
-    updateAlarmTimeDisplay(page)
-    pauseExecution(50)
-    updateAlarmStatusDisplay(page)
-}
-
-// Update just the alarm time buttons (id=5 and id=8).
-private void updateAlarmTimeDisplay(int page) {
-    String node   = settings.haspNode ?: "plate"
-    int hour24    = (state["p${page}alarmHour"]   ?: 7) as int
-    int minute    = (state["p${page}alarmMinute"] ?: 0) as int
-    int hour12    = (hour24 % 12 == 0) ? 12 : (hour24 % 12)
-    String ampm   = (hour24 >= 12) ? "PM" : "AM"
-    String minStr = minute < 10 ? "0${minute}" : "${minute}"
-    String timeText = "${hour12}:${minStr} ${ampm}"
-    infoLog "[Dashboard] Alarm time display p${page}: ${timeText}"
-    safePub("hasp/${node}/command/jsonl", '{"page":' + page + ',"id":5,"text":"' + timeText + '"}')
-    pauseExecution(20)
-    safePub("hasp/${node}/command/jsonl", '{"page":' + page + ',"id":8,"text":"' + ampm + '"}')
-}
-
-// Update the alarm enable/disable row (id=3).
-private void updateAlarmStatusDisplay(int page) {
-    String node     = settings.haspNode ?: "plate"
-    boolean enabled = (state["p${page}alarmEnabled"] == true)
-    boolean firing  = (state["p${page}alarmFiring"]  == true)
-    int hour24  = (state["p${page}alarmHour"]   ?: 7) as int
-    int minute  = (state["p${page}alarmMinute"] ?: 0) as int
-    int hour12  = (hour24 % 12 == 0) ? 12 : (hour24 % 12)
-    String ampm = (hour24 >= 12) ? "PM" : "AM"
-    String minStr = minute < 10 ? "0${minute}" : "${minute}"
-    String timeTag = "${hour12}:${minStr} ${ampm}"
-
-    String label, bgColor, fgColor
-    if (firing) {
-        label   = "ALARM! ${timeTag}  --  Tap to dismiss"
-        bgColor = "#AA0000"
-        fgColor = "#FFFFFF"
-    } else if (enabled) {
-        label   = "Alarm: ${timeTag}  --  ON"
-        bgColor = "#1A4A1A"
-        fgColor = "#00FF88"
-    } else {
-        label   = "Alarm: ${timeTag}  --  OFF"
-        bgColor = "#2A2A2A"
-        fgColor = "#888888"
-    }
-    safePub("hasp/${node}/command/jsonl", '{"page":' + page + ',"id":3,"text":"' + label + '","bg_color":"' + bgColor + '","text_color":"' + fgColor + '"}')
-}
-
-// Update the digital time (id=1) and date (id=2) labels.
-private void updateClockDisplay(int page) {
-    String node    = settings.haspNode ?: "plate"
-    Date now       = new Date()
-    String timeStr = now.format("h:mm a")
-    String dateStr = now.format("EEE, MMM d")
-    safePub("hasp/${node}/command/jsonl", '{"page":' + page + ',"id":1,"text":"' + timeStr + '"}')
-    pauseExecution(20)
-    safePub("hasp/${node}/command/jsonl", '{"page":' + page + ',"id":2,"text":"' + dateStr + '"}')
-}
-
-// Called from sendHeartbeat every minute. Updates time/date and checks alarm.
-def clockTick() {
-    if (state.pushInProgress) return
-    int numPg = (state.numberOfPages ?: 6) as int
-    (1..numPg).each { pg ->
-        if (activeGrid(pg) != "alarm") return
-        updateClockDisplay(pg)
-        checkAlarmCondition(pg)
-    }
-}
-
-private void checkAlarmCondition(int page) {
-    boolean enabled = (state["p${page}alarmEnabled"] == true)
-    if (!enabled) return
-    boolean firing = (state["p${page}alarmFiring"] == true)
-    if (firing) {
-        // Already firing -- keep buzzing until dismissed
-        fireAlarmBuzzer(page)
-        return
-    }
-    Date now        = new Date()
-    int curHour     = now.format("H") as int
-    int curMinute   = now.format("m") as int
-    int alarmHour   = (state["p${page}alarmHour"]   ?: 7) as int
-    int alarmMinute = (state["p${page}alarmMinute"] ?: 0) as int
-    int nowMins   = curHour * 60 + curMinute
-    int alarmMins = alarmHour * 60 + alarmMinute
-    debugLog "[Dashboard] Alarm check p${page}: now=${curHour}:${curMinute} alarm=${alarmHour}:${alarmMinute}"
-    // Fire only if now is at or up to 4 min AFTER alarm time (one-sided window, handles midnight wrap)
-    int diff = (nowMins - alarmMins + 1440) % 1440
-    if (diff >= 0 && diff <= 4) {
-        state["p${page}alarmFiring"] = true
-        updateAlarmStatusDisplay(page)
-        publishBacklight(true)
-        fireAlarmBuzzer(page)
-        infoLog "[Dashboard] Alarm FIRING on page ${page} at ${alarmHour}:${alarmMinute}"
-    }
-}
-
-private void fireAlarmBuzzer(int page) {
-    String node = settings.haspNode ?: "plate"
-    infoLog "[Dashboard] fireAlarmBuzzer p${page}"
-    // openHASP buzzer command -- topic: command/buzzer, payload: JSON with frequency (Hz) and duration (ms)
-    safePub("hasp/${node}/command/buzzer", '{"frequency":2000,"duration":500}')
-    pauseExecution(700)
-    safePub("hasp/${node}/command/buzzer", '{"frequency":2500,"duration":500}')
-    pauseExecution(700)
-    safePub("hasp/${node}/command/buzzer", '{"frequency":3000,"duration":500}')
-}
-
-// Handle taps on alarm clock page objects.
-//   id=3  toggle alarm enabled / dismiss if firing
-//   id=4  hour minus
-//   id=6  hour plus
-//   id=7  minute minus 5
-//   id=8  AM/PM flip
-//   id=9  minute plus 5
-private void handleAlarmTap(int page, int btnId) {
-    infoLog "[Dashboard] Alarm tap page ${page} btn ${btnId}"
-    boolean firing = (state["p${page}alarmFiring"] == true)
-
-    switch (btnId) {
-        case 3:
-            if (firing) {
-                // Dismiss the firing alarm
-                state["p${page}alarmFiring"]  = false
-                state["p${page}alarmEnabled"] = false
-                infoLog "[Dashboard] Alarm dismissed on page ${page}"
-            } else {
-                boolean cur = (state["p${page}alarmEnabled"] == true)
-                state["p${page}alarmEnabled"] = !cur
-                infoLog "[Dashboard] Alarm ${!cur ? 'enabled' : 'disabled'} on page ${page}"
-            }
-            updateAlarmStatusDisplay(page)
-            break
-        case 4:
-            // Hour minus (wrap 0->23)
-            int h = (state["p${page}alarmHour"] ?: 7) as int
-            state["p${page}alarmHour"] = (h == 0) ? 23 : h - 1
-            updateAlarmTimeDisplay(page)
-            updateAlarmStatusDisplay(page)
-            break
-        case 6:
-            // Hour plus (wrap 23->0)
-            int h = (state["p${page}alarmHour"] ?: 7) as int
-            state["p${page}alarmHour"] = (h == 23) ? 0 : h + 1
-            updateAlarmTimeDisplay(page)
-            updateAlarmStatusDisplay(page)
-            break
-        case 7:
-            // Minute minus 5 (wrap 0->55)
-            int m = (state["p${page}alarmMinute"] ?: 0) as int
-            state["p${page}alarmMinute"] = (m == 0) ? 55 : m - 5
-            updateAlarmTimeDisplay(page)
-            updateAlarmStatusDisplay(page)
-            break
-        case 8:
-            // AM/PM flip (add or subtract 12 hours, keeping in 0-23)
-            int h = (state["p${page}alarmHour"] ?: 7) as int
-            state["p${page}alarmHour"] = (h >= 12) ? h - 12 : h + 12
-            updateAlarmTimeDisplay(page)
-            updateAlarmStatusDisplay(page)
-            break
-        case 9:
-            // Minute plus 5 (wrap 55->0)
-            int m = (state["p${page}alarmMinute"] ?: 0) as int
-            state["p${page}alarmMinute"] = (m >= 55) ? 0 : m + 5
-            updateAlarmTimeDisplay(page)
-            updateAlarmStatusDisplay(page)
-            break
-    }
-}
-
 // ── Backlight ──────────────────────────────────────────────────────────────────
 
 private void startBacklightTimer() {
@@ -919,7 +693,7 @@ private boolean allInactive() {
     int numPg = (state.numberOfPages ?: 6) as int
     (1..numPg).every { pg ->
         int ms = maxSensors(pg)
-        if (ms < 1) return true   // alarm/zero-slot pages never trigger active state
+        if (ms < 1) return true
         (1..ms).every { idx ->
             String sType = state[typeKey(pg, idx)] ?: "none"
             if (sType == "light" || sType == "lock" || sType == "garage") return true
@@ -957,15 +731,6 @@ def resyncStates() {
             } else {
                 pushThermostatTile(pg, nd, temp, heat, cool, mode, ops, away)
             }
-            return
-        }
-        if (grid == "alarm") {
-            // Re-push alarm clock content from stored state
-            updateClockDisplay(pg)        // date label only; clock face is self-updating
-            pauseExecution(30)
-            updateAlarmTimeDisplay(pg)
-            pauseExecution(30)
-            updateAlarmStatusDisplay(pg)
             return
         }
         int ms = maxSensors(pg)
@@ -1055,7 +820,6 @@ private void pushPageLayout(int page) {
     String grid     = activeGrid(page)
     int total       = (state.numberOfPages ?: 6) as int
     String node     = settings.haspNode ?: "plate"
-    int tileFont    = tileFontFor(grid)
     int slots       = maxSensors(page)
 
     infoLog "[Dashboard] Pushing page ${page}/${total}: grid='${grid}' slots=${slots} storedGrid='${state["page${page}GridLayout"]}' storedSlots='${state["page${page}MaxSlots"]}'"
@@ -1117,22 +881,6 @@ private void pushPageLayout(int page) {
         return
     }
 
-    if (grid == "alarm") {
-        // Let the skeleton settle, then push the live clock and alarm state
-        pauseExecution(500)
-        pushAlarmClockContent(page)
-        int drainSecsAlarm = 3
-        switch (page) {
-            case 1: runIn(drainSecsAlarm, "navigatePage1"); break
-            case 2: runIn(drainSecsAlarm, "navigatePage2"); break
-            case 3: runIn(drainSecsAlarm, "navigatePage3"); break
-            case 4: runIn(drainSecsAlarm, "navigatePage4"); break
-            case 5: runIn(drainSecsAlarm, "navigatePage5"); break
-            case 6: runIn(drainSecsAlarm, "navigatePage6"); break
-        }
-        return
-    }
-
     // Icons sent via JSONL to preserve non-ASCII (raw topic strips Unicode private-use chars).
     // Labels come from syncAllSensors after push -- no need to duplicate here.
     if (slots > 0) {
@@ -1152,7 +900,7 @@ private void pushPageLayout(int page) {
                                                                   (settings.colorGarageOpen  ?: "#E65100")
                     String tileColor   = (activeState == "active") ? activeColor : inactiveColorFor(page, idx)
                     String lbl         = state[labelKey(page, idx)] ?: ""
-                    String clickJsonl  = buildLightTileJsonl(page, idx, grid, tileFont, tileColor, lbl)
+                    String clickJsonl  = buildLightTileJsonl(page, idx, grid, tileColor, lbl)
                     safePub("hasp/${node}/command/jsonl", clickJsonl)
                 } else {
                     // Non-tappable sensor tile -- publishIconJsonl handles icon+label+color
@@ -1297,11 +1045,14 @@ private List<String> layoutJsonl(String grid, int page, int totalPages) {
     List<String> out
     switch (grid) {
         case "thermostat": out = layoutThermostat(page); break
-        case "alarm":      out = layoutAlarmClock(page); break
         case "1x1": out = layout1x1(page); break
         case "3x3": out = layout3x3(page); break
         case "4x4": out = layout4x4(page); break
-        case "5x5": out = layoutNxN(page, 5, 94, 2, 12, 24); break
+        case "5x5": out = layoutNxN(page, 5, 94, 2, 12, 16); break
+        case "6x5": out = layout6x5(page); break
+        case "3x2": out = layoutGrid(page, 3, 2, 157, 237, 2, 24, 32, 180, 4, 10); break
+        case "4x3": out = layoutGrid(page, 4, 3, 117, 157, 2, 20, 24, 105, 2, 8); break
+        case "5x4": out = layoutGrid(page, 5, 4,  93, 117, 2, 14, 16,  85, 1, 4); break
         default:    out = layout2x2(page)
     }
 
@@ -1347,7 +1098,7 @@ private List<String> layout1x1(int page) {[
 private List<String> layout2x2(int page) {
     List<String> out = []
     [[1,2,2,236,236],[2,242,2,236,236],[3,2,242,236,236],[4,242,242,236,236]].each { r ->
-        out << """{"page":${page},"id":${r[0]},"obj":"btn","x":${r[1]},"y":${r[2]},"w":${r[3]},"h":${r[4]},"bg_color":"#000000","border_color":"black","border_width":4,"radius":10,"text":"","text_font":22,"align":"center","pad_top":106,"text_color":"white","value_str":"","value_font":40,"toggle":false,"click":false}"""
+        out << """{"page":${page},"id":${r[0]},"obj":"btn","x":${r[1]},"y":${r[2]},"w":${r[3]},"h":${r[4]},"bg_color":"#000000","border_color":"black","border_width":4,"radius":10,"text":"","text_font":28,"align":"center","pad_top":106,"text_color":"white","value_str":"","value_font":40,"toggle":false,"click":false}"""
     }
     return out
 }
@@ -1356,7 +1107,7 @@ private List<String> layout3x3(int page) {
     List<String> out = []
     int[][] cells = [[2,2,157,157],[161,2,157,157],[320,2,158,157],[2,161,157,157],[161,161,157,157],[320,161,158,157],[2,320,157,158],[161,320,157,158],[320,320,158,158]]
     cells.eachWithIndex { c, i ->
-        out << """{"page":${page},"id":${i+1},"obj":"btn","x":${c[0]},"y":${c[1]},"w":${c[2]},"h":${c[3]},"bg_color":"#000000","border_color":"black","border_width":4,"radius":10,"text":"","text_font":18,"align":"center","pad_top":70,"text_color":"white","value_str":"","value_font":32,"toggle":false,"click":false}"""
+        out << """{"page":${page},"id":${i+1},"obj":"btn","x":${c[0]},"y":${c[1]},"w":${c[2]},"h":${c[3]},"bg_color":"#000000","border_color":"black","border_width":4,"radius":10,"text":"","text_font":24,"align":"center","pad_top":70,"text_color":"white","value_str":"","value_font":32,"toggle":false,"click":false}"""
     }
     return out
 }
@@ -1366,7 +1117,7 @@ private List<String> layout4x4(int page) {
     (0..<cols).each { row -> (0..<cols).each { col ->
         int id = row*cols+col+1; int x = col*(w+gap)+gap; int y = row*(w+gap)+gap
         int tw = (col==cols-1) ? (480-x-gap) : w; int th = (row==cols-1) ? (480-y-gap) : w
-        out << """{"page":${page},"id":${id},"obj":"btn","x":${x},"y":${y},"w":${tw},"h":${th},"bg_color":"#000000","border_color":"black","border_width":2,"radius":8,"text":"","text_font":16,"align":"center","pad_top":52,"text_color":"white","value_str":"","value_font":24,"toggle":false,"click":false}"""
+        out << """{"page":${page},"id":${id},"obj":"btn","x":${x},"y":${y},"w":${tw},"h":${th},"bg_color":"#000000","border_color":"black","border_width":2,"radius":8,"text":"","text_font":20,"align":"center","pad_top":52,"text_color":"white","value_str":"","value_font":24,"toggle":false,"click":false}"""
     }}
     return out
 }
@@ -1377,6 +1128,35 @@ private List<String> layoutNxN(int page, int cols, int w, int gap, int tf, int i
         int id = row*cols+col+1; int x = col*(w+gap)+gap; int y = row*(w+gap)+gap
         int tw = (col==cols-1) ? (480-x-gap) : w; int th = (row==cols-1) ? (480-y-gap) : w
         out << """{"page":${page},"id":${id},"obj":"btn","x":${x},"y":${y},"w":${tw},"h":${th},"bg_color":"#000000","border_color":"black","border_width":1,"radius":4,"text":"","text_font":${tf},"align":"center","pad_top":42,"text_color":"white","value_str":"","value_font":${iconFont},"toggle":false,"click":false}"""
+    }}
+    return out
+}
+
+private List<String> layoutGrid(int page, int cols, int rows, int colW, int rowH, int gap, int tf, int iconFont, int padTop, int borderWidth, int radius) {
+    List<String> out = []
+    (0..<rows).each { row -> (0..<cols).each { col ->
+        int id = row * cols + col + 1
+        int x  = col * (colW + gap) + gap
+        int y  = row * (rowH + gap) + gap
+        int tw = (col == cols - 1) ? (480 - x - gap) : colW
+        int th = (row == rows - 1) ? (480 - y - gap) : rowH
+        out << """{"page":${page},"id":${id},"obj":"btn","x":${x},"y":${y},"w":${tw},"h":${th},"bg_color":"#000000","border_color":"black","border_width":${borderWidth},"radius":${radius},"text":"","text_font":${tf},"align":"center","pad_top":${padTop},"text_color":"white","value_str":"","value_font":${iconFont},"toggle":false,"click":false}"""
+    }}
+    return out
+}
+
+// 6 columns x 5 rows = 30 slots on a 480x480 display
+private List<String> layout6x5(int page) {
+    List<String> out = []
+    int cols = 6; int rows = 5; int gap = 2
+    int colW = 77; int rowH = 94
+    (0..<rows).each { row -> (0..<cols).each { col ->
+        int id  = row * cols + col + 1
+        int x   = col * (colW + gap) + gap
+        int y   = row * (rowH + gap) + gap
+        int tw  = (col == cols - 1) ? (480 - x - gap) : colW
+        int th  = (row == rows - 1) ? (480 - y - gap) : rowH
+        out << """{"page":${page},"id":${id},"obj":"btn","x":${x},"y":${y},"w":${tw},"h":${th},"bg_color":"#000000","border_color":"black","border_width":1,"radius":4,"text":"","text_font":12,"align":"center","pad_top":58,"text_color":"white","value_str":"","value_font":16,"toggle":false,"click":false}"""
     }}
     return out
 }
@@ -1493,9 +1273,8 @@ private void setMotionActiveForPage(int page, int idx) {
                                                    (settings.colorGarageOpen   ?: "#E65100")
         if (sType == "garage") activeColor = (settings.colorGarageOpen ?: "#E65100")
         String grid       = activeGrid(page)
-        int    tileFont   = tileFontFor(grid)
         String lbl        = state[labelKey(page, idx)] ?: ""
-        String clickJsonl = buildLightTileJsonl(page, idx, grid, tileFont, activeColor, lbl)
+        String clickJsonl = buildLightTileJsonl(page, idx, grid, activeColor, lbl)
         if (clickJsonl) {
             String node = settings.haspNode ?: "plate"
             safePub("hasp/${node}/command/jsonl", clickJsonl)
@@ -1541,9 +1320,8 @@ private void setMotionInactiveForPage(int page, int idx) {
         unschedule(fadeKey); state.remove(fadeKey)
         String ic         = inactiveColorFor(page, idx)
         String grid       = activeGrid(page)
-        int    tileFont   = tileFontFor(grid)
         String lbl        = state[labelKey(page, idx)] ?: ""
-        String clickJsonl = buildLightTileJsonl(page, idx, grid, tileFont, ic, lbl)
+        String clickJsonl = buildLightTileJsonl(page, idx, grid, ic, lbl)
         if (clickJsonl) {
             String node = settings.haspNode ?: "plate"
             safePub("hasp/${node}/command/jsonl", clickJsonl)
@@ -1558,9 +1336,9 @@ private void setMotionInactiveForPage(int page, int idx) {
         String node = settings.haspNode ?: "plate"
         String escaped = iconToJsonEscape(inactiveIconFor(page, idx))
         String lbl = state[labelKey(page, idx)] ?: ""
-        String escapedLbl = lbl.replace('"', '\\"')
+        String escapedLbl = labelToJsonEscape(lbl)
         String grid = activeGrid(page)
-        int iFont = iconFontFor(grid); int lFont = labelFontFor(grid)
+        int iFont = iconFontFor(grid); int lFont = labelFontFor(grid, lbl)
         int[] ofs = iconOffsetsFor(grid); int padTop = labelPadTopFor(grid)
         safePub("hasp/${node}/command/jsonl",
             '{"page":' + page + ',"id":' + bgId(idx) +
@@ -1692,18 +1470,18 @@ private void applySlotTypes(slotTypes, int page) {
 
 // Sends only the properties that change for tappable tiles (color, text, click).
 // Updates tappable tile: color, click:true, label in text, icon in value_str (top-left).
-private String buildLightTileJsonl(int page, int slot, String grid, int tileFont, String bgColor = "#000000", String label = "") {
+private String buildLightTileJsonl(int page, int slot, String grid, String bgColor = "#000000", String label = "") {
     String sType       = state[typeKey(page, slot)] ?: "none"
     String activeState = state[stateKey(page, slot)] ?: "inactive"
     String icon        = (sType == "light")  ? (activeState == "active" ? ICON_LIGHTBULB_ON() : ICON_LIGHTBULB_OFF()) :
                          (sType == "lock")   ? (activeState == "active" ? ICON_LOCK_OPEN()    : ICON_LOCK())          :
                          (sType == "garage") ? (activeState == "active" ? ICON_GARAGE_OPEN()  : ICON_GARAGE())        : ""
     String escapedIcon  = iconToJsonEscape(icon)
-    String escapedLabel = label.replace('"', '\\"').replace('\n', '\\n')
+    String escapedLabel = labelToJsonEscape(label)
     String contrast     = contrastColor(bgColor)
     int    iFont        = iconFontFor(grid)
     int[]  ofs          = iconOffsetsFor(grid)
-    int    lFont        = labelFontFor(grid)
+    int    lFont        = labelFontFor(grid, label)
     int    padTop       = labelPadTopFor(grid)
     return """{"page":${page},"id":${bgId(slot)},"bg_color":"${bgColor}","text_color":"${contrast}","text":"${escapedLabel}","text_font":${lFont},"align":"center","pad_top":${padTop},"value_str":"${escapedIcon}","value_font":${iFont},"value_ofs_x":${ofs[0]},"value_ofs_y":${ofs[1]},"value_color":"${contrast}","click":true}"""
 }
@@ -1762,7 +1540,6 @@ def fadeContinueAll() {
                 state.remove("fadeTarget_${pg}_${idx}")
                 String ic = inactiveColorFor(pg, idx)
                 publishColor(pg, idx, ic)
-                publishTextColor(pg, idx, ic)
             } else {
                 state[fadeKey] = step
                 anyRemaining = true
@@ -1770,7 +1547,6 @@ def fadeContinueAll() {
                 String ic    = inactiveColorFor(pg, idx)
                 String color = interpolateColor("#FF0000", ic, step, FADE_STEPS)
                 publishColor(pg, idx, color)
-                publishTextColor(pg, idx, color)
             }
         }
     }
@@ -1805,9 +1581,27 @@ private void publishColor(int page, int idx, String color) {
     safePub("hasp/" + node + "/command/jsonl", jsonl)
 }
 
-private void publishTextColor(int page, int idx, String color) {
-    // No-op: publishColor now handles both btn and icon text colors together.
-    // Kept for call-site compatibility.
+private String labelToJsonEscape(String s) {
+    if (!s) return ""
+    def hexDigits = ['0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F']
+    StringBuilder sb = new StringBuilder()
+    for (int i = 0; i < s.length(); i++) {
+        int cp = (int) s.charAt(i)
+        if (cp > 127) {
+            sb.append('\\').append('u')
+            sb.append(hexDigits[(cp >> 12) & 0xF])
+            sb.append(hexDigits[(cp >>  8) & 0xF])
+            sb.append(hexDigits[(cp >>  4) & 0xF])
+            sb.append(hexDigits[ cp        & 0xF])
+        } else if (cp == (int)'"') {
+            sb.append('\\"')
+        } else if (cp == (int)'\n') {
+            sb.append('\\n')
+        } else {
+            sb.append((char) cp)
+        }
+    }
+    return sb.toString()
 }
 
 // Send icon as value_str (top-left corner) and label as text (centered).
@@ -1816,11 +1610,11 @@ private void publishIconJsonl(String node, int page, int idx, String icon, Strin
     try {
         String escaped    = iconToJsonEscape(icon)
         String lbl        = state[labelKey(page, idx)] ?: ""
-        String escapedLbl = lbl.replace('"', '\\"').replace('\n', '\\n')
+        String escapedLbl = labelToJsonEscape(lbl)
         String grid       = activeGrid(page)
         int    iFont      = iconFontFor(grid)
         int[]  ofs        = iconOffsetsFor(grid)
-        int    lFont      = labelFontFor(grid)
+        int    lFont      = labelFontFor(grid, lbl)
         int    padTop     = labelPadTopFor(grid)
         String tColor     = bgColor ? contrastColor(bgColor) : "white"
 
@@ -1843,37 +1637,25 @@ private void publishIconJsonl(String node, int page, int idx, String icon, Strin
     }
 }
 
-// Return the pre-computed JSON \\uXXXX escape for known icon glyphs.
-// Avoids String.format and Integer.toHexString which are not available in Hubitat sandbox.
+// Convert an icon glyph string to JSON \\uXXXX escapes.
+// Handles any Unicode character and multi-char strings (e.g. double water drop).
 private String iconToJsonEscape(String s) {
     if (!s) return ""
-    // Fast path: single-character icons from our known set
-    if (s.length() == 1) {
-        switch (s) {
-            case "": return "\\uE70E"   // run
-            case "": return "\\uE004"   // account
-            case "": return "\\uE026"   // alert
-            case "": return "\\uE238"   // fire
-            case "": return "\\uE58C"   // water
-            case "": return "\\uE58E"   // water-percent
-            case "": return "\\uE2DC"   // home
-            case "": return "\\uE6A1"   // home-outline
-            case "": return "\\uE6E8"   // lightbulb-on
-            case "": return "\\uE335"   // lightbulb
-            case "": return "\\uEFC6"   // lock-open-variant
-            case "": return "\\uE33E"   // lock
-            case "": return "\\uF2D4"   // garage-open-variant
-            case "": return "\\uF2D3"   // garage-variant
-            case "": return "\\uE415"   // plus
-            case "": return "\\uE374"   // minus
+    def hexDigits = ['0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F']
+    StringBuilder sb = new StringBuilder()
+    for (int i = 0; i < s.length(); i++) {
+        int cp = (int) s.charAt(i)
+        if (cp > 127) {
+            sb.append('\\').append('u')
+            sb.append(hexDigits[(cp >> 12) & 0xF])
+            sb.append(hexDigits[(cp >>  8) & 0xF])
+            sb.append(hexDigits[(cp >>  4) & 0xF])
+            sb.append(hexDigits[ cp        & 0xF])
+        } else {
+            sb.append((char) cp)
         }
     }
-    // Fallback: pass ASCII strings through unchanged, drop unknowns
-    boolean allAscii = true
-    for (int i = 0; i < s.length(); i++) {
-        if ((int) s.charAt(i) > 127) { allAscii = false; break }
-    }
-    return allAscii ? s : ""
+    return sb.toString()
 }
 
 // Returns black or white depending on which contrasts better with the given hex color.
@@ -1891,37 +1673,35 @@ private String contrastColor(String hex) {
     }
 }
 
-private void publishJsonl(String node, int page, int objId, Map props) {
-    def obj = [page: page, id: objId] + props
-    String json = groovy.json.JsonOutput.toJson(obj)
-    safePub("hasp/${node}/command/jsonl", json)
-}
-
 // ── Icon constants ─────────────────────────────────────────────────────────────
 
 // Icon glyphs -- codes from official openHASP 0.7 font table:
 // https://www.openhasp.com/0.7.0/design/fonts/
-private String ICON_MOTION_ACTIVE()   { return "" }   // run
-private String ICON_MOTION_INACTIVE() { return "" }   // account
-private String ICON_SMOKE_ACTIVE()    { return "" }   // alert
-private String ICON_SMOKE_INACTIVE()  { return "" }   // fire
-private String ICON_WATER_ACTIVE()    { return "" }   // water
-private String ICON_WATER_INACTIVE()  { return "" }   // water-percent
-private String ICON_CONTACT_OPEN()    { return "" }   // home (contact open/active)
-private String ICON_CONTACT_CLOSED()  { return "" }   // home-outline (contact closed)
-private String ICON_LIGHTBULB_ON()    { return "" }   // lightbulb-on
-private String ICON_LIGHTBULB_OFF()   { return "" }   // lightbulb
-private String ICON_LOCK_OPEN()       { return "" }   // lock-open-variant (included in openHASP font)
-private String ICON_LOCK()            { return "" }   // lock
-private String ICON_GARAGE_OPEN()     { return "" }   // garage-open-variant (included in openHASP font)
-private String ICON_GARAGE()          { return "" }   // garage-variant
+private String ICON_MOTION_ACTIVE()   { return "" }
+private String ICON_MOTION_INACTIVE() { return "" }
+private String ICON_SMOKE_ACTIVE()    { return "\uE026" }   // alert
+private String ICON_SMOKE_INACTIVE()  { return "\uE238" }   // fire
+private String ICON_WATER_WET()       { return "\uE58C\uE58C" }   // two water drops (wet)
+private String ICON_WATER_DRY()       { return "\uE58C" }          // single water drop (dry)
+private String ICON_DOOR_OPEN()       { return "\uF208" }   // door-open
+private String ICON_DOOR_CLOSED()     { return "\uE81C" }   // door
+private String ICON_WINDOW_OPEN()     { return "\uF6A3" }   // window-open
+private String ICON_WINDOW_CLOSED()   { return "\uF1DB" }   // window
+private String ICON_LIGHTBULB_ON()    { return "\uE6E8" }   // lightbulb-on
+private String ICON_LIGHTBULB_OFF()   { return "\uE335" }   // lightbulb
+private String ICON_LOCK_OPEN()       { return "\uEFC6" }   // lock-open-variant
+private String ICON_LOCK()            { return "\uE33E" }   // lock
+private String ICON_GARAGE_OPEN()     { return "\uF2D4" }   // garage-open-variant
+private String ICON_GARAGE()          { return "\uF2D3" }   // garage-variant
 
 private String activeIconFor(int page, int idx) {
     String t = state[typeKey(page, idx)] ?: state["pageType${page}"] ?: "motion"
     switch (t) {
         case "smoke":   return ICON_SMOKE_ACTIVE()
-        case "water":   return ICON_WATER_ACTIVE()
-        case "contact": return ICON_CONTACT_OPEN()
+        case "water":   return ICON_WATER_WET()
+        case "door":    return ICON_DOOR_OPEN()
+        case "window":  return ICON_WINDOW_OPEN()
+        case "contact": return ICON_DOOR_OPEN()
         case "lock":    return ICON_LOCK_OPEN()
         case "garage":  return ICON_GARAGE_OPEN()
         default:        return ICON_MOTION_ACTIVE()
@@ -1932,8 +1712,10 @@ private String inactiveIconFor(int page, int idx) {
     String t = state[typeKey(page, idx)] ?: state["pageType${page}"] ?: "motion"
     switch (t) {
         case "smoke":   return ICON_SMOKE_INACTIVE()
-        case "water":   return ICON_WATER_INACTIVE()
-        case "contact": return ICON_CONTACT_CLOSED()
+        case "water":   return ICON_WATER_DRY()
+        case "door":    return ICON_DOOR_CLOSED()
+        case "window":  return ICON_WINDOW_CLOSED()
+        case "contact": return ICON_DOOR_CLOSED()
         case "light":   return ICON_LIGHTBULB_OFF()
         case "lock":    return ICON_LOCK()
         case "garage":  return ICON_GARAGE()
@@ -1944,6 +1726,8 @@ private String inactiveIconFor(int page, int idx) {
 private String inactiveColorFor(int page, int idx) {
     String t = state[typeKey(page, idx)] ?: state["pageType${page}"] ?: "motion"
     switch (t) {
+        case "door":    return (settings.colorDoorInactive    ?: "#00FFFF")
+        case "window":  return (settings.colorWindowInactive  ?: "#00FFFF")
         case "contact": return (settings.colorContactInactive ?: "#00FFFF")
         case "water":   return (settings.colorWaterInactive   ?: "#0000FF")
         case "smoke":   return (settings.colorSmokeInactive   ?: "#808080")
@@ -1951,31 +1735,6 @@ private String inactiveColorFor(int page, int idx) {
         case "lock":    return (settings.colorLockInactive    ?: "#1B5E20")   // dark green = locked/safe
         case "garage":  return (settings.colorGarageInactive  ?: "#1B5E20")   // dark green = closed/safe
         default:        return (settings.colorInactive        ?: "#008000")
-    }
-}
-
-// ── Grid helpers ───────────────────────────────────────────────────────────────
-
-private int gridNFor(String grid) {
-    switch (grid) {
-        case "1x1": return 1
-        case "2x2": return 2
-        case "3x3": return 3
-        case "4x4": return 4
-        case "5x5": return 5
-        default:    return 2
-    }
-}
-
-private int maxCharsForGrid(int n) {
-    switch (n) {
-        case 1: return 30
-        case 2: return 16
-        case 3: return 11
-        case 4: return 7
-        case 5: return 6
-        case 6: return 5
-        default: return 4
     }
 }
 
