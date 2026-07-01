@@ -4,7 +4,7 @@
  */
 
 /**
- * SenseCAP Dashboard and Thermostat App v1.3.1
+ * SenseCAP Dashboard and Thermostat App v1.5.0
  *
  * Hubitat app companion to SenseCAP Dashboard and Thermostat Driver.
  * Manages up to 6 display pages on the SenseCAP Indicator D1 via openHASP/MQTT.
@@ -32,7 +32,7 @@
  *           thermostatPeriodicSync so drift is caught between mode changes.
  *
  * Author: jlslate (slate)
- * Version: 1.3.1
+ * Version: 1.5.0
  */
 
 definition(
@@ -143,8 +143,7 @@ def mainPage() {
                               submitOnChange: true
                         List selDevs = settings[devInputName] ?: []
                         int cnt = selDevs.size()
-                        int n = gridSizeFor(cnt)
-                        paragraph "Devices: <b>${cnt}</b> &rarr; Grid: <b>${n}x${n}</b>"
+                        paragraph "Devices: <b>${cnt}</b> &rarr; Grid: <b>${nxnString(cnt)}</b>"
                         if (cnt > 0) {
                             input name: "page${srcPage}RenameSlots",
                                   type: "bool",
@@ -234,10 +233,9 @@ private void renderMixedPageInputs(int srcPage) {
           submitOnChange: true
 
     String gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
-    int gridN = gridSel as int
-    int totalSlots = gridN * gridN
+    int totalSlots = mixedGridSlots(gridSel)
 
-    paragraph "Grid: <b>${gridN}x${gridN}</b> (${totalSlots} slots)"
+    paragraph "Grid: <b>${mixedGridLabel(gridSel)}</b> (${totalSlots} slots)"
 
     (1..totalSlots).each { slot ->
         String typeKey = "page${srcPage}MixedSlot${slot}Type"
@@ -281,6 +279,8 @@ private Map pageTypeOptions() {
     ["smoke":"Smoke detectors",
      "motion":"Motion sensors",
      "water":"Water sensors",
+     "door":"Door sensors",
+     "window":"Window sensors",
      "contact":"Contact sensors",
      "lock":"Locks",
      "garage":"Garage doors",
@@ -293,6 +293,8 @@ private Map sensorTypeOptions() {
     ["smoke":"Smoke",
      "motion":"Motion",
      "water":"Water",
+     "door":"Door",
+     "window":"Window",
      "contact":"Contact",
      "lock":"Lock",
      "garage":"Garage door",
@@ -302,9 +304,32 @@ private Map sensorTypeOptions() {
 private Map mixedGridOptions() {
     ["1":"1x1 (1 slot)",
      "2":"2x2 (4 slots)",
+     "3x2":"3x2 (6 slots)",
      "3":"3x3 (9 slots)",
+     "4x3":"4x3 (12 slots)",
      "4":"4x4 (16 slots)",
-     "5":"5x5 (25 slots)"]
+     "5x4":"5x4 (20 slots)",
+     "5":"5x5 (25 slots)",
+     "6x5":"6x5 (30 slots)"]
+}
+
+// Number of slots for a mixed-grid selection key.
+private int mixedGridSlots(String sel) {
+    if (!sel) return 1
+    if (sel.contains("x") && !(sel ==~ /\d+/)) {
+        def parts = sel.split("x")
+        return (parts[0] as int) * (parts[1] as int)
+    }
+    int n = sel as int
+    return n * n
+}
+
+// Display string for a mixed-grid selection key.
+private String mixedGridLabel(String sel) {
+    if (!sel) return "1x1"
+    if (sel.contains("x") && !(sel ==~ /\d+/)) return sel
+    int n = sel as int
+    return "${n}x${n}"
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -314,6 +339,8 @@ private String capabilityFor(String sType) {
         case "smoke":   return "capability.smokeDetector"
         case "motion":  return "capability.motionSensor"
         case "water":   return "capability.waterSensor"
+        case "door":    return "capability.contactSensor"
+        case "window":  return "capability.contactSensor"
         case "contact": return "capability.contactSensor"
         case "lock":    return "capability.lock"
         case "garage":  return "capability.garageDoorControl"
@@ -328,6 +355,8 @@ private String attributeFor(String sType) {
         case "smoke":   return "smoke"
         case "motion":  return "motion"
         case "water":   return "water"
+        case "door":    return "contact"
+        case "window":  return "contact"
         case "contact": return "contact"
         case "lock":    return "lock"
         case "garage":  return "door"
@@ -341,6 +370,8 @@ private String activeValueFor(String sType) {
         case "smoke":   return "detected"
         case "motion":  return "active"
         case "water":   return "wet"
+        case "door":    return "open"
+        case "window":  return "open"
         case "contact": return "open"
         case "lock":    return "unlocked"
         case "garage":  return "open"
@@ -369,9 +400,9 @@ private List pageDevices(int page) {
 private int pageDeviceCount(int page) {
     String pType = settings["page${page}Type"] ?: ""
     if (pType == "mixed") {
-        int gridN = (settings["page${page}MixedGrid"] ?: "1") as int
+        String _gridSel = settings["page${page}MixedGrid"] ?: "1"
         int count = 0
-        (1..gridN * gridN).each { slot ->
+        (1..mixedGridSlots(_gridSel)).each { slot ->
             String slotType = settings["page${page}MixedSlot${slot}Type"] ?: ""
             if (slotType) {
                 def dev = settings["page${page}MixedSlot${slot}Device_${slotType}"]
@@ -393,8 +424,8 @@ private String pageType(int page) {
 private Map buildSlotMap(int page, List devices, String sType) {
     Map m = [:]
     if (sType == "mixed") {
-        int gridN = (settings["page${page}MixedGrid"] ?: "1") as int
-        (1..gridN * gridN).each { slot ->
+        String _gridSel = settings["page${page}MixedGrid"] ?: "1"
+        (1..mixedGridSlots(_gridSel)).each { slot ->
             String slotType = settings["page${page}MixedSlot${slot}Type"] ?: ""
             if (slotType) {
                 def dev = settings["page${page}MixedSlot${slot}Device_${slotType}"]
@@ -415,8 +446,8 @@ private List<Map> pageSlotEntries(int page) {
     String pType = settings["page${page}Type"] ?: ""
     List<Map> entries = []
     if (pType == "mixed") {
-        int gridN = (settings["page${page}MixedGrid"] ?: "1") as int
-        (1..gridN * gridN).each { slot ->
+        String _gridSel = settings["page${page}MixedGrid"] ?: "1"
+        (1..mixedGridSlots(_gridSel)).each { slot ->
             String slotType = settings["page${page}MixedSlot${slot}Type"] ?: ""
             if (slotType) {
                 def dev = settings["page${page}MixedSlot${slot}Device_${slotType}"]
@@ -534,6 +565,36 @@ def uninstalled() {
     unsubscribe()
 }
 
+private String layoutFingerprint() {
+    List parts = []
+    parts << (settings.indicatorDevice?.id?.toString() ?: "none")
+    parts << (settings.addPage2 ? "1" : "0")
+    parts << (settings.addPage3 ? "1" : "0")
+    parts << (settings.addPage4 ? "1" : "0")
+    parts << (settings.addPage5 ? "1" : "0")
+    parts << (settings.addPage6 ? "1" : "0")
+    (1..6).each { pg ->
+        String pType = settings["page${pg}Type"] ?: ""
+        parts << "p${pg}:${pType}"
+        parts << "ord:${settings["page${pg}Order"] ?: pg}"
+        if (pType == "mixed") {
+            String gridN = settings["page${pg}MixedGrid"] ?: "1"
+            parts << "grid:${gridN}"
+            int n = mixedGridSlots(gridN)
+            (1..n).each { slot ->
+                String st = settings["page${pg}MixedSlot${slot}Type"] ?: ""
+                def dev = settings["page${pg}MixedSlot${slot}Device_${st}"]
+                parts << "s${slot}:${st}:${dev?.id ?: ''}"
+            }
+        } else if (pType && pType != "thermostat") {
+            def devs = settings["page${pg}Devices_${pType}"]
+            String devIds = devs ? (devs instanceof List ? devs.collect { it.id }.sort().join(",") : devs.id.toString()) : ""
+            parts << "devs:${devIds}"
+        }
+    }
+    return parts.join("|")
+}
+
 def initialize() {
     if (!settings.indicatorDevice) {
         infoLog "[Dashboard] No indicator device selected"
@@ -552,8 +613,8 @@ def initialize() {
         String pType = pageType(srcPage)
         String grid
         if (pType == "mixed") {
-            int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-            grid = "${gridN}x${gridN}"
+            String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+            grid = mixedGridLabel(_gridSel)
         } else if (pType == "thermostat") {
             grid = "thermostat"
         } else {
@@ -596,13 +657,21 @@ def initialize() {
     unschedule("thermostatPeriodicSync")
     runEvery1Minute("thermostatPeriodicSync")
 
-    String mqttSt = settings.indicatorDevice.currentValue("mqttStatus") ?: ""
-    if (mqttSt.startsWith("Connected")) {
-        infoLog "[Dashboard] Rebooting display to clear stale state"
-        try { settings.indicatorDevice.rebootDisplay() } catch (Exception e) { infoLog "[Dashboard] WARN -- rebootDisplay: ${e.message}" }
-        runIn(35, "pushSlotTypesAndLayouts")
+    String newFp = layoutFingerprint()
+    boolean layoutChanged = (newFp != state.layoutFingerprint)
+    state.layoutFingerprint = newFp
+
+    if (layoutChanged) {
+        String mqttSt = settings.indicatorDevice.currentValue("mqttStatus") ?: ""
+        if (mqttSt.startsWith("Connected")) {
+            infoLog "[Dashboard] Layout changed -- rebooting display"
+            try { settings.indicatorDevice.rebootDisplay() } catch (Exception e) { infoLog "[Dashboard] WARN -- rebootDisplay: ${e.message}" }
+            runIn(35, "pushSlotTypesAndLayouts")
+        } else {
+            runIn(2, "pushSlotTypesAndLayouts")
+        }
     } else {
-        runIn(2, "pushSlotTypesAndLayouts")
+        infoLog "[Dashboard] No layout change -- skipping reboot"
     }
 
     unschedule("syncLightStates")
@@ -624,6 +693,8 @@ private void subscribePageDevices(int dispPage, int srcPage, String pType) {
             case "smoke":   subscribe(dev, "smoke",   smokeHandler);   break
             case "motion":  subscribe(dev, "motion",  motionHandler);  break
             case "water":   subscribe(dev, "water",   waterHandler);   break
+            case "door":    subscribe(dev, "contact", doorHandler);    break
+            case "window":  subscribe(dev, "contact", windowHandler);  break
             case "contact": subscribe(dev, "contact", contactHandler); break
             case "lock":    subscribe(dev, "lock",    lockHandler);    break
             case "garage":  subscribe(dev, "door",    garageHandler);  break
@@ -681,21 +752,22 @@ def pushSlotTypesAndLayouts() {
 private void pushPageSlotTypes(int dispPage, int srcPage, List devices, String sType) {
     Map types = [:]
     if (sType == "mixed") {
-        int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-        int totalSlots = gridN * gridN
+        String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+        int totalSlots = mixedGridSlots(_gridSel)
         (1..totalSlots).each { slot ->
             String slotType = settings["page${srcPage}MixedSlot${slot}Type"] ?: ""
             types[slot] = slotType ?: "none"
         }
     } else if (sType == "thermostat") {
-        // Slot 1 = thermostat display, slots 2-6 = thermostat control buttons
+        // Slot 1 = thermostat display, slots 2-4 = thermostat control buttons
         (1..4).each { slot -> types[slot] = "thermostat" }
     } else {
-        int n = gridSizeFor(devices.size())
-        (1..n * n).each { slot ->
+        int totalSlots = nxnSlots(devices.size())
+        (1..totalSlots).each { slot ->
             types[slot] = (slot <= devices.size()) ? sType : "none"
         }
     }
+    if (!types) return
     try {
         switch (dispPage) {
             case 1: settings.indicatorDevice.updatePage1SlotTypes(types); break
@@ -714,9 +786,10 @@ private void pushPageLabels(int dispPage, int srcPage, List devices, String sTyp
     if (sType == "thermostat") return   // thermostat manages its own display
     Map labels = [:]
     if (sType == "mixed") {
-        int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-        int maxChars = maxCharsForGrid(gridN)
-        (1..gridN * gridN).each { slot ->
+        String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+        int _gridCols = _gridSel.contains("x") ? (_gridSel.split("x")[0] as int) : (_gridSel as int)
+        int maxChars = maxCharsForGrid(_gridCols)
+        (1..mixedGridSlots(_gridSel)).each { slot ->
             String slotType = settings["page${srcPage}MixedSlot${slot}Type"] ?: ""
             if (slotType) {
                 def dev = settings["page${srcPage}MixedSlot${slot}Device_${slotType}"]
@@ -729,8 +802,9 @@ private void pushPageLabels(int dispPage, int srcPage, List devices, String sTyp
         }
     } else {
         if (!devices) return
-        int n = gridSizeFor(devices.size())
-        int maxChars = maxCharsForGrid(n)
+        String _autoGrid = nxnString(devices.size())
+        int _autoCols = _autoGrid.contains("x") ? (_autoGrid.split("x")[0] as int) : (_autoGrid as int)
+        int maxChars = maxCharsForGrid(_autoCols)
         devices.eachWithIndex { dev, idx ->
             if (!dev) return
             int slot = idx + 1
@@ -770,6 +844,14 @@ def motionHandler(evt) {
 
 def waterHandler(evt) {
     handleEvent(evt, "water", "wet")
+}
+
+def doorHandler(evt) {
+    handleEvent(evt, "door", "open")
+}
+
+def windowHandler(evt) {
+    handleEvent(evt, "window", "open")
 }
 
 def contactHandler(evt) {
@@ -1050,8 +1132,8 @@ private void handleEvent(evt, String sType, String activeValue) {
 
         if (pType == "mixed") {
             // Search mixed slots for this device + matching type
-            int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-            (1..gridN * gridN).each { slot ->
+            String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+            (1..mixedGridSlots(_gridSel)).each { slot ->
                 String slotType = settings["page${srcPage}MixedSlot${slot}Type"] ?: ""
                 if (slotType != sType) return
                 def dev = settings["page${srcPage}MixedSlot${slot}Device_${slotType}"]
@@ -1157,8 +1239,8 @@ def displayRebootedHandler(evt) {
         String pType = pageType(srcPage)
         String grid
         if (pType == "mixed") {
-            int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-            grid = "${gridN}x${gridN}"
+            String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+            grid = mixedGridLabel(_gridSel)
         } else if (pType == "thermostat") {
             grid = "thermostat"
         } else {
@@ -1179,8 +1261,8 @@ def syncLightStates() {
         int dispPage = dispIdx + 1
         String pType = pageType(srcPage)
         if (pType == "mixed") {
-            int gridN = (settings["page${srcPage}MixedGrid"] ?: "1") as int
-            (1..gridN * gridN).each { slot ->
+            String _gridSel = settings["page${srcPage}MixedGrid"] ?: "1"
+            (1..mixedGridSlots(_gridSel)).each { slot ->
                 String slotType = settings["page${srcPage}MixedSlot${slot}Type"] ?: ""
                 if (slotType != "light") return
                 def dev = settings["page${srcPage}MixedSlot${slot}Device_${slotType}"]
@@ -1223,8 +1305,7 @@ def syncAllSensors() {
         int totalSlots = 0
         if (pType != "mixed") {
             List devs = sortDevicesForPage(srcPage, pageDevices(srcPage))
-            int n = gridSizeFor(devs.size())
-            totalSlots = n * n
+            totalSlots = nxnSlots(devs.size())
         }
 
         entries.each { e ->
@@ -1259,18 +1340,29 @@ def syncAllSensors() {
 
 // ── Grid / label helpers ──────────────────────────────────────────────────────
 
-private int gridSizeFor(int count) {
-    if (count <= 1) return 1
-    if (count <= 4) return 2
-    if (count <= 9) return 3
-    if (count <= 16) return 4
-    if (count <= 25) return 5
-    return 5
-}
 
 private String nxnString(int count) {
-    int n = gridSizeFor(count)
-    return "${n}x${n}"
+    if (count <= 1)  return "1x1"
+    if (count <= 4)  return "2x2"
+    if (count <= 6)  return "3x2"
+    if (count <= 9)  return "3x3"
+    if (count <= 12) return "4x3"
+    if (count <= 16) return "4x4"
+    if (count <= 20) return "5x4"
+    if (count <= 25) return "5x5"
+    return "6x5"
+}
+
+private int nxnSlots(int count) {
+    if (count <= 1)  return 1
+    if (count <= 4)  return 4
+    if (count <= 6)  return 6
+    if (count <= 9)  return 9
+    if (count <= 12) return 12
+    if (count <= 16) return 16
+    if (count <= 20) return 20
+    if (count <= 25) return 25
+    return 30
 }
 
 private int maxCharsForGrid(int n) {
@@ -1287,6 +1379,7 @@ private String stripEmoji(String text) {
     if (!text) return ""
     return text.replaceAll(/[^\x20-\x7E]/, "").replaceAll(/\s+/, " ").trim()
 }
+
 
 private List sortDevicesByName(List devices) {
     if (!devices) return []
